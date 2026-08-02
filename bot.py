@@ -24,7 +24,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import aiosqlite
-import yt_dlp
 
 # =========================================================================
 # CONFIG
@@ -80,7 +79,6 @@ FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options": "-vn",
 }
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 QUIZ_QUESTIONS = [
     ("What is the capital of France?", "paris"),
