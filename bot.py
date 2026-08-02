@@ -24,6 +24,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import aiosqlite
+import yt_dlp
 
 # =========================================================================
 # CONFIG
@@ -66,6 +67,20 @@ TICKET_TYPES = {
     "billing": {"label": "Billing / Purchases", "emoji": "💳"},
     "report": {"label": "Report a User", "emoji": "🚨"},
 }
+
+# ---- Music ----
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "default_search": "ytsearch",
+    "source_address": "0.0.0.0",
+}
+FFMPEG_OPTIONS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 QUIZ_QUESTIONS = [
     ("What is the capital of France?", "paris"),
@@ -408,6 +423,8 @@ class MyBot(commands.Bot):
         self.db = Database()
         self.active_quiz_channels: set[int] = set()
         self.last_active_channel: dict[int, int] = {}  # guild_id -> channel_id
+        self.afk_users: dict[int, dict] = {}  # user_id -> {"reason": str, "since": float}
+        self.music_queues: dict[int, list[dict]] = {}  # guild_id -> [{"title","url","stream_url","requester"}]
 
     async def setup_hook(self):
         await self.db.connect()
@@ -429,6 +446,23 @@ class MyBot(commands.Bot):
             return
 
         self.last_active_channel[message.guild.id] = message.channel.id
+
+        # ---- AFK: clear the sender's AFK status if they had one ----
+        if message.author.id in self.afk_users:
+            del self.afk_users[message.author.id]
+            try:
+                await message.channel.send(f"👋 Welcome back {message.author.mention}, I've removed your AFK.", delete_after=10)
+            except discord.Forbidden:
+                pass
+
+        # ---- AFK: notify if someone pinged an AFK user ----
+        for mentioned in message.mentions:
+            if mentioned.id in self.afk_users:
+                info = self.afk_users[mentioned.id]
+                since = int(info["since"])
+                await message.channel.send(
+                    f"💤 {mentioned.mention} is AFK: {info['reason']} (since <t:{since}:R>)"
+                )
 
         now = time.time()
         last = await self.db.get_last_chat_reward(message.author.id)
@@ -672,6 +706,60 @@ class MyBot(commands.Bot):
     @giveaway_checker.before_loop
     async def before_giveaway_checker(self):
         await self.wait_until_ready()
+
+    # ---------------- Music ----------------
+    async def extract_track(self, query: str) -> dict | None:
+        """Runs the blocking yt-dlp lookup in a background thread."""
+        loop = asyncio.get_event_loop()
+
+        def _extract():
+            info = ytdl.extract_info(query, download=False)
+            if "entries" in info:  # search result or playlist -> take first
+                info = info["entries"][0]
+            return info
+
+        try:
+            info = await loop.run_in_executor(None, _extract)
+        except Exception as e:
+            log.warning(f"yt-dlp extraction failed: {e}")
+            return None
+
+        return {
+            "title": info.get("title", "Unknown title"),
+            "webpage_url": info.get("webpage_url", query),
+            "stream_url": info.get("url"),
+            "duration": info.get("duration"),
+        }
+
+    async def play_next(self, guild: discord.Guild):
+        queue = self.music_queues.get(guild.id, [])
+        voice_client = guild.voice_client
+        if not voice_client:
+            return
+
+        if not queue:
+            return  # nothing left; stay connected until /leave or timeout elsewhere
+
+        track = queue.pop(0)
+        source = discord.FFmpegPCMAudio(track["stream_url"], **FFMPEG_OPTIONS)
+
+        def _after(error):
+            if error:
+                log.warning(f"Playback error: {error}")
+            fut = asyncio.run_coroutine_threadsafe(self.play_next(guild), self.loop)
+            try:
+                fut.result()
+            except Exception as e:
+                log.warning(f"Error advancing queue: {e}")
+
+        voice_client.play(source, after=_after)
+        text_channel_id = self.last_active_channel.get(guild.id)
+        channel = self.get_channel(text_channel_id) if text_channel_id else None
+        if channel:
+            await channel.send(embed=discord.Embed(
+                description=f"🎶 Now playing: **{track['title']}**",
+                color=discord.Color.blurple(),
+            ))
 
 
 bot = MyBot()
@@ -980,7 +1068,362 @@ async def serverinfo(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# ---- Generic error handler for all the @is_staff() checks above ----
+# =========================================================================
+# SLASH COMMANDS — Fun
+# =========================================================================
+@bot.tree.command(name="afk", description="Set yourself as AFK")
+@app_commands.describe(reason="Why you're AFK (optional)")
+async def afk(interaction: discord.Interaction, reason: str = "AFK"):
+    bot.afk_users[interaction.user.id] = {"reason": reason, "since": time.time()}
+    await interaction.response.send_message(f"💤 {interaction.user.mention} is now AFK: {reason}")
+
+
+@bot.tree.command(name="roll", description="Roll a dice")
+@app_commands.describe(sides="Number of sides on the dice (default 6)")
+async def roll(interaction: discord.Interaction, sides: app_commands.Range[int, 2, 1000] = 6):
+    result = random.randint(1, sides)
+    await interaction.response.send_message(embed=discord.Embed(
+        description=f"🎲 {interaction.user.mention} rolled a **d{sides}** and got **{result}**!",
+        color=discord.Color.blurple(),
+    ))
+
+
+@bot.tree.command(name="flip", description="Flip a coin")
+async def flip(interaction: discord.Interaction):
+    result = random.choice(["Heads", "Tails"])
+    emoji = "🪙"
+    await interaction.response.send_message(embed=discord.Embed(
+        description=f"{emoji} The coin landed on **{result}**!", color=discord.Color.gold()
+    ))
+
+
+# =========================================================================
+# SLASH COMMANDS — Casino (wager your coins)
+# =========================================================================
+@bot.tree.command(name="coinflip", description="Bet coins on a coin flip — double or nothing")
+@app_commands.describe(bet="How much to wager", choice="Heads or Tails")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Heads", value="heads"),
+    app_commands.Choice(name="Tails", value="tails"),
+])
+async def coinflip(interaction: discord.Interaction, bet: app_commands.Range[int, 1, None], choice: app_commands.Choice[str]):
+    balance = await bot.db.get_balance(interaction.user.id)
+    if balance < bet:
+        await interaction.response.send_message(f"❌ You don't have {fmt(bet)} {CURRENCY_NAME}.", ephemeral=True)
+        return
+
+    result = random.choice(["heads", "tails"])
+    if result == choice.value:
+        await bot.db.add_balance(interaction.user.id, bet)
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"🪙 It landed on **{result.title()}** — you called it! You won **{fmt(bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}.",
+            color=discord.Color.green(),
+        ))
+    else:
+        await bot.db.add_balance(interaction.user.id, -bet)
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"🪙 It landed on **{result.title()}** — bad luck. You lost **{fmt(bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}.",
+            color=discord.Color.red(),
+        ))
+
+
+@bot.tree.command(name="dicebet", description="Guess the dice roll (1-6) for a big payout")
+@app_commands.describe(bet="How much to wager", guess="Your guess, 1-6")
+async def dicebet(interaction: discord.Interaction, bet: app_commands.Range[int, 1, None], guess: app_commands.Range[int, 1, 6]):
+    balance = await bot.db.get_balance(interaction.user.id)
+    if balance < bet:
+        await interaction.response.send_message(f"❌ You don't have {fmt(bet)} {CURRENCY_NAME}.", ephemeral=True)
+        return
+
+    result = random.randint(1, 6)
+    if result == guess:
+        winnings = bet * 5
+        await bot.db.add_balance(interaction.user.id, winnings)
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"🎲 The dice landed on **{result}** — exact match! You won **{fmt(winnings)} {CURRENCY_NAME}** {CURRENCY_EMOJI}!",
+            color=discord.Color.green(),
+        ))
+    else:
+        await bot.db.add_balance(interaction.user.id, -bet)
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"🎲 The dice landed on **{result}**, not {guess}. You lost **{fmt(bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}.",
+            color=discord.Color.red(),
+        ))
+
+
+SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "⭐", "💎"]
+SLOT_PAYOUTS = {"💎": 10, "⭐": 7, "🔔": 5, "🍇": 4, "🍋": 3, "🍒": 2}
+
+
+@bot.tree.command(name="slots", description="Spin the slot machine")
+@app_commands.describe(bet="How much to wager")
+async def slots(interaction: discord.Interaction, bet: app_commands.Range[int, 1, None]):
+    balance = await bot.db.get_balance(interaction.user.id)
+    if balance < bet:
+        await interaction.response.send_message(f"❌ You don't have {fmt(bet)} {CURRENCY_NAME}.", ephemeral=True)
+        return
+
+    spin = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+    display = " | ".join(spin)
+
+    if spin[0] == spin[1] == spin[2]:
+        multiplier = SLOT_PAYOUTS[spin[0]]
+        winnings = bet * multiplier
+        await bot.db.add_balance(interaction.user.id, winnings)
+        result_text = f"🎉 JACKPOT! Triple {spin[0]} — you won **{fmt(winnings)} {CURRENCY_NAME}** {CURRENCY_EMOJI} ({multiplier}x)!"
+        color = discord.Color.gold()
+    elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
+        winnings = bet  # push, get bet back
+        result_text = f"😐 Two matched — you broke even and kept your **{fmt(bet)} {CURRENCY_NAME}**."
+        color = discord.Color.light_grey()
+    else:
+        await bot.db.add_balance(interaction.user.id, -bet)
+        result_text = f"💸 No match — you lost **{fmt(bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}."
+        color = discord.Color.red()
+
+    embed = discord.Embed(title="🎰 Slot Machine", description=f"**[ {display} ]**\n\n{result_text}", color=color)
+    await interaction.response.send_message(embed=embed)
+
+
+# ---- Blackjack ----
+CARD_RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+
+
+def draw_card() -> str:
+    return random.choice(CARD_RANKS)
+
+
+def card_value(card: str) -> int:
+    if card in ("J", "Q", "K"):
+        return 10
+    if card == "A":
+        return 11
+    return int(card)
+
+
+def hand_value(cards: list[str]) -> int:
+    total = sum(card_value(c) for c in cards)
+    aces = cards.count("A")
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+
+def hand_str(cards: list[str]) -> str:
+    return " ".join(cards)
+
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int, player: list[str], dealer: list[str]):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.bet = bet
+        self.player = player
+        self.dealer = dealer
+        self.done = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your game.", ephemeral=True)
+            return False
+        return True
+
+    def render(self, reveal_dealer: bool = False) -> discord.Embed:
+        player_total = hand_value(self.player)
+        if reveal_dealer:
+            dealer_display = f"{hand_str(self.dealer)} (**{hand_value(self.dealer)}**)"
+        else:
+            dealer_display = f"{self.dealer[0]} 🂠"
+        embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.dark_green())
+        embed.add_field(name="Your hand", value=f"{hand_str(self.player)} (**{player_total}**)", inline=False)
+        embed.add_field(name="Dealer's hand", value=dealer_display, inline=False)
+        embed.set_footer(text=f"Bet: {fmt(self.bet)} {CURRENCY_NAME}")
+        return embed
+
+    async def end_game(self, interaction: discord.Interaction, result: str, payout: int):
+        self.done = True
+        for child in self.children:
+            child.disabled = True
+        if payout != 0:
+            await bot.db.add_balance(self.user_id, payout)
+        embed = self.render(reveal_dealer=True)
+        embed.add_field(name="Result", value=result, inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.blurple, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            return
+        self.player.append(draw_card())
+        total = hand_value(self.player)
+        if total > 21:
+            await self.end_game(interaction, f"💥 Bust! You lost **{fmt(self.bet)} {CURRENCY_NAME}**.", -self.bet)
+        else:
+            await interaction.response.edit_message(embed=self.render(), view=self)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.grey, emoji="✋")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            return
+        while hand_value(self.dealer) < 17:
+            self.dealer.append(draw_card())
+
+        player_total = hand_value(self.player)
+        dealer_total = hand_value(self.dealer)
+
+        if dealer_total > 21 or player_total > dealer_total:
+            payout = self.bet
+            result = f"🎉 You win! You gained **{fmt(payout)} {CURRENCY_NAME}** {CURRENCY_EMOJI}."
+        elif player_total == dealer_total:
+            payout = 0
+            result = "😐 Push — your bet was returned."
+        else:
+            payout = -self.bet
+            result = f"💸 Dealer wins. You lost **{fmt(self.bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}."
+
+        await self.end_game(interaction, result, payout)
+
+
+@bot.tree.command(name="blackjack", description="Play a hand of blackjack against the dealer")
+@app_commands.describe(bet="How much to wager")
+async def blackjack(interaction: discord.Interaction, bet: app_commands.Range[int, 1, None]):
+    balance = await bot.db.get_balance(interaction.user.id)
+    if balance < bet:
+        await interaction.response.send_message(f"❌ You don't have {fmt(bet)} {CURRENCY_NAME}.", ephemeral=True)
+        return
+
+    player = [draw_card(), draw_card()]
+    dealer = [draw_card(), draw_card()]
+    view = BlackjackView(interaction.user.id, bet, player, dealer)
+
+    if hand_value(player) == 21:
+        await bot.db.add_balance(interaction.user.id, int(bet * 1.5))
+        embed = view.render(reveal_dealer=True)
+        embed.add_field(name="Result", value=f"🎉 Blackjack! You won **{fmt(int(bet * 1.5))} {CURRENCY_NAME}** {CURRENCY_EMOJI}.", inline=False)
+        await interaction.response.send_message(embed=embed)
+        return
+
+    await interaction.response.send_message(embed=view.render(), view=view)
+
+
+# =========================================================================
+# SLASH COMMANDS — Music
+# =========================================================================
+@bot.tree.command(name="join", description="Join your voice channel")
+async def join(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("❌ You need to be in a voice channel first.", ephemeral=True)
+        return
+    channel = interaction.user.voice.channel
+    if interaction.guild.voice_client:
+        await interaction.guild.voice_client.move_to(channel)
+    else:
+        await channel.connect()
+    await interaction.response.send_message(f"✅ Joined **{channel.name}**.")
+
+
+@bot.tree.command(name="leave", description="Leave the voice channel and clear the queue")
+async def leave(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if not voice_client:
+        await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+        return
+    bot.music_queues.pop(interaction.guild.id, None)
+    await voice_client.disconnect()
+    await interaction.response.send_message("👋 Left the voice channel.")
+
+
+@bot.tree.command(name="play", description="Play a song (YouTube URL or search terms)")
+@app_commands.describe(query="A YouTube link or something to search for")
+async def play(interaction: discord.Interaction, query: str):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("❌ Join a voice channel first.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    voice_client = interaction.guild.voice_client
+    if not voice_client:
+        voice_client = await interaction.user.voice.channel.connect()
+
+    track = await bot.extract_track(query)
+    if track is None or not track.get("stream_url"):
+        await interaction.followup.send("❌ Couldn't find or play that. Try a different search or link.", ephemeral=True)
+        return
+
+    bot.last_active_channel[interaction.guild.id] = interaction.channel.id
+    queue = bot.music_queues.setdefault(interaction.guild.id, [])
+    queue.append({
+        "title": track["title"],
+        "stream_url": track["stream_url"],
+        "webpage_url": track["webpage_url"],
+        "requester": interaction.user.id,
+    })
+
+    if voice_client.is_playing() or voice_client.is_paused():
+        await interaction.followup.send(embed=discord.Embed(
+            description=f"➕ Queued: **{track['title']}**", color=discord.Color.blurple()
+        ))
+    else:
+        await interaction.followup.send(embed=discord.Embed(
+            description=f"🎶 Loading: **{track['title']}**", color=discord.Color.blurple()
+        ))
+        await bot.play_next(interaction.guild)
+
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if not voice_client or not (voice_client.is_playing() or voice_client.is_paused()):
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+    voice_client.stop()  # triggers the `after` callback -> plays next automatically
+    await interaction.response.send_message("⏭️ Skipped.")
+
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if not voice_client or not voice_client.is_playing():
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+    voice_client.pause()
+    await interaction.response.send_message("⏸️ Paused.")
+
+
+@bot.tree.command(name="resume", description="Resume the paused song")
+async def resume(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if not voice_client or not voice_client.is_paused():
+        await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+        return
+    voice_client.resume()
+    await interaction.response.send_message("▶️ Resumed.")
+
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def stop(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    bot.music_queues.pop(interaction.guild.id, None)
+    if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+        voice_client.stop()
+    await interaction.response.send_message("⏹️ Stopped and cleared the queue.")
+
+
+@bot.tree.command(name="queue", description="Show the current music queue")
+async def queue_cmd(interaction: discord.Interaction):
+    queue = bot.music_queues.get(interaction.guild.id, [])
+    if not queue:
+        await interaction.response.send_message("The queue is empty.", ephemeral=True)
+        return
+    lines = [f"**{i}.** {t['title']} — requested by <@{t['requester']}>" for i, t in enumerate(queue, start=1)]
+    await interaction.response.send_message(embed=discord.Embed(
+        title="🎶 Up Next", description="\n".join(lines[:15]), color=discord.Color.blurple()
+    ))
+
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
