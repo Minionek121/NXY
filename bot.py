@@ -42,24 +42,23 @@ TICKET_CATEGORY_ID = int(_ticket_cat) if _ticket_cat.isdigit() else None
 _log_chan = os.getenv("LOG_CHANNEL_ID", "")
 LOG_CHANNEL_ID = int(_log_chan) if _log_chan.isdigit() else None
 
+# Only this user can run /addcoins and /removecoins, regardless of staff roles
+_owner_raw = os.getenv("OWNER_USER_ID", "1482743052903649361")
+OWNER_USER_ID = int(_owner_raw) if _owner_raw.isdigit() else None
+
 CURRENCY_NAME = "coins"
 CURRENCY_EMOJI = "🪙"
 
 # ---- Economy tuning (your numbers) ----
 # Chat rewards scale with message length: short messages earn the minimum,
 # long ones scale up toward the max. Cooldown stops spam-farming.
-CHAT_REWARD_MIN = 400_000
-CHAT_REWARD_MAX = 500_000
+CHAT_REWARD_MIN = 800_000
+CHAT_REWARD_MAX = 1_200_000
 CHAT_REWARD_LONG_MSG_CHARS = 150      # a message this long or more earns the max
 CHAT_REWARD_COOLDOWN_SECONDS = 0
 
 DAILY_REWARD_MIN = 5_000_000
 DAILY_REWARD_MAX = 10_000_000
-
-QUIZ_REWARD = 25_000_000
-QUIZ_TIMEOUT_SECONDS = 30
-QUIZ_INTERVAL_MIN_MINUTES = 30   # a quiz fires roughly every 30-45 min per active channel
-QUIZ_INTERVAL_MAX_MINUTES = 45
 
 TICKET_TYPES = {
     "general": {"label": "General Support", "emoji": "🎫"},
@@ -81,57 +80,6 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-
-QUIZ_QUESTIONS = [
-    ("What is the capital of France?", "paris"),
-    ("How many continents are there on Earth?", "7"),
-    ("What is 12 + 30?", "42"),
-    ("What planet is known as the Red Planet?", "mars"),
-    ("What is the largest ocean on Earth?", "pacific"),
-    ("How many days are there in a leap year?", "366"),
-    ("What is the chemical symbol for gold?", "au"),
-    ("Who wrote Romeo and Juliet?", "shakespeare"),
-    ("What is the smallest prime number?", "2"),
-    ("What language is spoken in Brazil?", "portuguese"),
-    ("How many legs does a spider have?", "8"),
-    ("What is the fastest land animal?", "cheetah"),
-    ("What color do you get mixing blue and yellow?", "green"),
-    ("What is the square root of 64?", "8"),
-    ("What gas do plants absorb from the air?", "carbon dioxide"),
-    # ---- Guess the animal ----
-    ("🐘 Guess the animal: I have a long trunk and huge ears, and I'm the largest land mammal.", "elephant"),
-    ("🦒 Guess the animal: I have the longest neck of any animal and spots on my body.", "giraffe"),
-    ("🐧 Guess the animal: I'm a flightless bird that lives in cold places and loves to swim.", "penguin"),
-    ("🦁 Guess the animal: I'm called the king of the jungle and the males have a big mane.", "lion"),
-    ("🐨 Guess the animal: I'm a marsupial from Australia and I mostly eat eucalyptus leaves.", "koala"),
-    ("🦊 Guess the animal: I'm known for being sly and clever, with a bushy tail and pointed ears.", "fox"),
-    ("🦈 Guess the animal: I'm a fish with rows of sharp teeth and I never stop swimming.", "shark"),
-    ("🐍 Guess the animal: I have no legs, I slither on the ground, and some of my kind are venomous.", "snake"),
-    # ---- Guess the food ----
-    ("🍕 Guess the food: I'm Italian, round, and usually topped with cheese and tomato sauce.", "pizza"),
-    ("🍣 Guess the food: I'm a Japanese dish made with vinegared rice and often raw fish.", "sushi"),
-    ("🌮 Guess the food: I'm a Mexican dish with a folded tortilla filled with meat, veggies, and salsa.", "taco"),
-    ("🍜 Guess the food: I'm a noodle soup, popular in Japan, often served with broth and toppings.", "ramen"),
-    ("🍫 Guess the food: I'm sweet, made from cacao beans, and come in dark, milk, or white varieties.", "chocolate"),
-    ("🍔 Guess the food: I'm a sandwich with a beef patty, usually served with a bun, lettuce, and cheese.", "burger"),
-    ("🍩 Guess the food: I'm a round, fried pastry with a hole in the middle, often glazed.", "donut"),
-    # ---- Guess the item ----
-    ("⌚ Guess the item: I'm worn on your wrist and tell you the time.", "watch"),
-    ("🔑 Guess the item: I unlock doors and you usually carry me on a ring.", "key"),
-    ("☂️ Guess the item: I protect you from the rain when you open me up.", "umbrella"),
-    ("📱 Guess the item: I'm a device you carry in your pocket to call, text, and browse the internet.", "phone"),
-    ("🪞 Guess the item: I show your reflection when you look into me.", "mirror"),
-    ("🕯️ Guess the item: I'm made of wax, have a wick, and give off light when lit.", "candle"),
-    # ---- Guess the country ----
-    ("🗼 Guess the country: home to the Eiffel Tower and the Louvre Museum.", "france"),
-    ("🗽 Guess the country: home to the Statue of Liberty and Hollywood.", "usa"),
-    ("🏯 Guess the country: known for Mount Fuji, sushi, and anime.", "japan"),
-    ("🐼 Guess the country: home to the Great Wall and giant pandas.", "china"),
-    ("🦘 Guess the country: home to kangaroos, koalas, and the Sydney Opera House.", "australia"),
-    ("🍕 Guess the country: shaped like a boot, famous for pizza and pasta.", "italy"),
-    ("🕌 Guess the country: home of the Taj Mahal and Bollywood.", "india"),
-    ("🏔️ Guess the country: home to the Pyramids of Giza and the Nile River.", "egypt"),
-]
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -156,6 +104,14 @@ def is_staff():
         if role_ids.intersection(STAFF_ROLE_IDS):
             return True
         raise app_commands.CheckFailure("You don't have permission to do that.")
+    return app_commands.check(predicate)
+
+
+def is_owner():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if interaction.user.id == OWNER_USER_ID:
+            return True
+        raise app_commands.CheckFailure("Only the bot owner can use this command.")
     return app_commands.check(predicate)
 
 
@@ -421,7 +377,6 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS, help_command=None)
         self.db = Database()
-        self.active_quiz_channels: set[int] = set()
         self.last_active_channel: dict[int, int] = {}  # guild_id -> channel_id
         self.afk_users: dict[int, dict] = {}  # user_id -> {"reason": str, "since": float}
         self.music_queues: dict[int, list[dict]] = {}  # guild_id -> [{"title","url","stream_url","requester"}]
@@ -432,7 +387,6 @@ class MyBot(commands.Bot):
         self.add_view(TicketControlView())
         self.add_view(GiveawayView())
         self.giveaway_checker.start()
-        self.loop.create_task(self.quiz_loop())
         await self.tree.sync()
         log.info("Slash commands synced.")
 
@@ -471,52 +425,6 @@ class MyBot(commands.Bot):
             amount = int(CHAT_REWARD_MIN + (CHAT_REWARD_MAX - CHAT_REWARD_MIN) * length_ratio)
             await self.db.add_balance(message.author.id, amount)
             await self.db.set_last_chat_reward(message.author.id, now)
-
-    # ---------------- Quiz loop (fires every random 30-45 min per guild) ----------------
-    async def quiz_loop(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            wait_minutes = random.uniform(QUIZ_INTERVAL_MIN_MINUTES, QUIZ_INTERVAL_MAX_MINUTES)
-            await asyncio.sleep(wait_minutes * 60)
-            for guild_id, channel_id in list(self.last_active_channel.items()):
-                channel = self.get_channel(channel_id)
-                if channel:
-                    asyncio.create_task(self.run_quiz(channel))
-
-    async def run_quiz(self, channel: discord.abc.Messageable):
-        if channel.id in self.active_quiz_channels:
-            return
-        self.active_quiz_channels.add(channel.id)
-        try:
-            question, answer = random.choice(QUIZ_QUESTIONS)
-            embed = discord.Embed(
-                title="🧠 Quick Quiz!",
-                description=(
-                    f"**{question}**\n\nFirst correct answer wins "
-                    f"**{fmt(QUIZ_REWARD)} {CURRENCY_NAME}** {CURRENCY_EMOJI}\n"
-                    f"You have {QUIZ_TIMEOUT_SECONDS} seconds."
-                ),
-                color=discord.Color.gold(),
-            )
-            await channel.send(embed=embed)
-
-            def check(m: discord.Message):
-                return m.channel.id == channel.id and not m.author.bot and m.content.strip().lower() == answer
-
-            try:
-                msg = await self.wait_for("message", check=check, timeout=QUIZ_TIMEOUT_SECONDS)
-                await self.db.add_balance(msg.author.id, QUIZ_REWARD)
-                await channel.send(embed=discord.Embed(
-                    description=f"🎉 {msg.author.mention} got it right and won **{fmt(QUIZ_REWARD)} {CURRENCY_NAME}** {CURRENCY_EMOJI}!",
-                    color=discord.Color.green(),
-                ))
-            except asyncio.TimeoutError:
-                await channel.send(embed=discord.Embed(
-                    description=f"⏰ Nobody answered in time! The answer was **{answer}**.",
-                    color=discord.Color.red(),
-                ))
-        finally:
-            self.active_quiz_channels.discard(channel.id)
 
     # ---------------- Ticket logic ----------------
     async def open_ticket(self, interaction: discord.Interaction, ticket_type: str):
@@ -915,6 +823,40 @@ async def leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=discord.Embed(
         title=f"🏆 {CURRENCY_NAME.title()} Leaderboard", description="\n".join(lines), color=discord.Color.gold()
     ))
+
+
+@bot.tree.command(name="addcoins", description="Grant coins to a member (bot owner only)")
+@app_commands.describe(user="Who to give coins to", amount="How much to grant", reason="Why (shown in the log)")
+@is_owner()
+async def addcoins(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None], reason: str = "No reason provided"):
+    await bot.db.add_balance(user.id, amount)
+    new_balance = await bot.db.get_balance(user.id)
+    await interaction.response.send_message(embed=discord.Embed(
+        description=f"✅ Granted **{fmt(amount)} {CURRENCY_NAME}** {CURRENCY_EMOJI} to {user.mention}.\n"
+                    f"New balance: **{fmt(new_balance)} {CURRENCY_NAME}**",
+        color=discord.Color.green(),
+    ))
+    await _log_action(
+        interaction.guild,
+        f"💰 {interaction.user} granted {fmt(amount)} {CURRENCY_NAME} to {user} — {reason}",
+    )
+
+
+@bot.tree.command(name="removecoins", description="Remove coins from a member (bot owner only)")
+@app_commands.describe(user="Who to remove coins from", amount="How much to remove", reason="Why (shown in the log)")
+@is_owner()
+async def removecoins(interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None], reason: str = "No reason provided"):
+    await bot.db.add_balance(user.id, -amount)
+    new_balance = await bot.db.get_balance(user.id)
+    await interaction.response.send_message(embed=discord.Embed(
+        description=f"✅ Removed **{fmt(amount)} {CURRENCY_NAME}** {CURRENCY_EMOJI} from {user.mention}.\n"
+                    f"New balance: **{fmt(new_balance)} {CURRENCY_NAME}**",
+        color=discord.Color.orange(),
+    ))
+    await _log_action(
+        interaction.guild,
+        f"💸 {interaction.user} removed {fmt(amount)} {CURRENCY_NAME} from {user} — {reason}",
+    )
 
 
 # =========================================================================
