@@ -52,8 +52,8 @@ CURRENCY_EMOJI = "🪙"
 # ---- Economy tuning (your numbers) ----
 # Chat rewards scale with message length: short messages earn the minimum,
 # long ones scale up toward the max. Cooldown stops spam-farming.
-CHAT_REWARD_MIN = 800_000
-CHAT_REWARD_MAX = 1_200_000
+CHAT_REWARD_MIN = 400_000
+CHAT_REWARD_MAX = 400_000
 CHAT_REWARD_LONG_MSG_CHARS = 150      # a message this long or more earns the max
 CHAT_REWARD_COOLDOWN_SECONDS = 0
 
@@ -1124,6 +1124,67 @@ async def slots(interaction: discord.Interaction, bet: app_commands.Range[int, 1
         color = discord.Color.red()
 
     embed = discord.Embed(title="🎰 Slot Machine", description=f"**[ {display} ]**\n\n{result_text}", color=color)
+    await interaction.response.send_message(embed=embed)
+
+
+RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+
+
+@bot.tree.command(name="roulette", description="Bet coins on a roulette spin")
+@app_commands.describe(
+    bet="How much to wager",
+    choice="red, black, green, even, odd, or an exact number 0-36",
+)
+async def roulette(interaction: discord.Interaction, bet: app_commands.Range[int, 1, None], choice: str):
+    balance = await bot.db.get_balance(interaction.user.id)
+    if balance < bet:
+        await interaction.response.send_message(f"❌ You don't have {fmt(bet)} {CURRENCY_NAME}.", ephemeral=True)
+        return
+
+    choice_clean = choice.strip().lower()
+    valid_words = {"red", "black", "green", "even", "odd"}
+    if choice_clean not in valid_words and not (choice_clean.isdigit() and 0 <= int(choice_clean) <= 36):
+        await interaction.response.send_message(
+            "❌ Invalid choice. Use `red`, `black`, `green`, `even`, `odd`, or a number `0`-`36`.", ephemeral=True
+        )
+        return
+
+    result_num = random.randint(0, 36)
+    if result_num == 0:
+        result_color = "green"
+    elif result_num in RED_NUMBERS:
+        result_color = "red"
+    else:
+        result_color = "black"
+
+    multiplier = 0
+    if choice_clean.isdigit() and int(choice_clean) == result_num:
+        multiplier = 35
+    elif choice_clean == "green" and result_color == "green":
+        multiplier = 14
+    elif choice_clean in ("red", "black") and choice_clean == result_color:
+        multiplier = 2
+    elif choice_clean in ("even", "odd") and result_num != 0:
+        is_even = result_num % 2 == 0
+        if (choice_clean == "even") == is_even:
+            multiplier = 2
+
+    color_emoji = {"red": "🔴", "black": "⚫", "green": "🟢"}[result_color]
+    if multiplier > 0:
+        winnings = bet * (multiplier - 1) if multiplier > 1 else bet
+        await bot.db.add_balance(interaction.user.id, winnings)
+        result_text = f"🎉 You won **{fmt(winnings)} {CURRENCY_NAME}** {CURRENCY_EMOJI}! ({multiplier}x)"
+        color = discord.Color.green()
+    else:
+        await bot.db.add_balance(interaction.user.id, -bet)
+        result_text = f"💸 You lost **{fmt(bet)} {CURRENCY_NAME}** {CURRENCY_EMOJI}."
+        color = discord.Color.red()
+
+    embed = discord.Embed(
+        title="🎡 Roulette",
+        description=f"The ball landed on **{result_num} {color_emoji} {result_color.title()}**\n\n{result_text}",
+        color=color,
+    )
     await interaction.response.send_message(embed=embed)
 
 
