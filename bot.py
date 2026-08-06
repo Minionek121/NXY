@@ -43,7 +43,7 @@ _log_chan = os.getenv("LOG_CHANNEL_ID", "")
 LOG_CHANNEL_ID = int(_log_chan) if _log_chan.isdigit() else None
 
 # Only this user can run /addcoins and /removecoins, regardless of staff roles
-_owner_raw = os.getenv("OWNER_USER_ID", "1482743052903649361")
+_owner_raw = os.getenv("BOT_OWNER_ID", "1242816242017108071")
 OWNER_USER_ID = int(_owner_raw) if _owner_raw.isdigit() else None
 
 CURRENCY_NAME = "coins"
